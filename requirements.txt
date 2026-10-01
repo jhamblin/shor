@@ -1,0 +1,2 @@
+amazon-braket-sdk>=1.87.0
+numpy
