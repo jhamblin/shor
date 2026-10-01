@@ -18,7 +18,9 @@ example) behind every step here.
 
 import argparse
 import math
+import os
 import random
+import sys
 from fractions import Fraction
 from typing import List, Optional, Tuple
 
@@ -27,6 +29,25 @@ from braket.circuits import Circuit
 from braket.devices import LocalSimulator
 
 DEFAULT_N = 15
+
+
+def _load_quantum_arithmetic():
+    """Import the sibling quantum-arithmetic repo, used only by
+    --backend gates. Assumes both repos live as siblings under the same
+    parent directory (no packaging/pip-install machinery exists in this
+    project family) -- see quantum-arithmetic/README.md section 7."""
+    sibling = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "quantum-arithmetic")
+    if sibling not in sys.path:
+        sys.path.insert(0, sibling)
+    try:
+        import quantum_arithmetic
+    except ImportError as e:
+        raise SystemExit(
+            "--backend gates requires the quantum-arithmetic sibling repo, "
+            f"expected at {os.path.normpath(sibling)}. Clone it next to this "
+            "one (see quantum-arithmetic's README)."
+        ) from e
+    return quantum_arithmetic
 
 MANAGED_SIMULATORS = {
     "sv1": "arn:aws:braket:::device/quantum-simulator/amazon/sv1",
@@ -211,13 +232,33 @@ def build_modexp_circuit(
 
 
 def build_shor_circuit(
-    a: int, N: int, counting_qubits: List[int], work_qubits: List[int]
+    a: int,
+    N: int,
+    counting_qubits: List[int],
+    work_qubits: List[int],
+    backend: str = "unitary",
+    acc_qubits: Optional[List[int]] = None,
+    ancilla: Optional[int] = None,
+    and_ancilla: Optional[int] = None,
 ) -> Circuit:
+    """backend="unitary" (default): build_modexp_circuit's Circuit.unitary()
+    construction -- simulator-only, independent of N/a.
+    backend="gates": the quantum-arithmetic sibling repo's modexp_ladder --
+    elementary gates only, submittable to Rigetti/IQM (not IonQ -- see
+    quantum-arithmetic/README.md section 8). Needs acc_qubits (width
+    len(work_qubits)+1), ancilla, and and_ancilla -- see README section 9.2.
+    """
     circuit = Circuit()
     for q in counting_qubits:
         circuit.h(q)
     circuit.x(work_qubits[-1])  # prepare the work register in state |1>
-    circuit.add_circuit(build_modexp_circuit(a, N, len(work_qubits), counting_qubits, work_qubits))
+    if backend == "unitary":
+        circuit.add_circuit(build_modexp_circuit(a, N, len(work_qubits), counting_qubits, work_qubits))
+    elif backend == "gates":
+        qa = _load_quantum_arithmetic()
+        qa.modexp_ladder(circuit, counting_qubits, work_qubits, acc_qubits, ancilla, and_ancilla, a, N)
+    else:
+        raise ValueError(f"unknown backend {backend!r}")
     circuit.add_circuit(inverse_qft_circuit(counting_qubits))
     return circuit
 
@@ -245,9 +286,18 @@ def main() -> None:
         "--device",
         choices=["local", *MANAGED_SIMULATORS, "qpu"],
         default="local",
-        help="Where to run the circuit (default: local). NOTE: this "
-        "circuit uses Circuit.unitary() for modular exponentiation, "
-        "which real QPUs do not accept -- see README section 7.",
+        help="Where to run the circuit (default: local). --backend unitary "
+        "(the default) does not run on any real QPU; --backend gates runs "
+        "on Rigetti/IQM but not IonQ -- see README section 9.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["unitary", "gates"],
+        default="unitary",
+        help="How to build modular exponentiation. 'unitary' (default): "
+        "Circuit.unitary(), simulator-only. 'gates': elementary gates "
+        "from the quantum-arithmetic sibling repo, submittable to "
+        "Rigetti/IQM (not IonQ) -- see README section 9.2.",
     )
     parser.add_argument("--qpu-arn", default=None, help="Device ARN to use when --device qpu.")
     parser.add_argument(
@@ -269,6 +319,15 @@ def main() -> None:
     counting_qubits = list(range(n_counting))
     work_qubits = list(range(n_counting, n_counting + n_work))
 
+    acc_qubits = ancilla = and_ancilla = None
+    extra_qubits = 0
+    if args.backend == "gates":
+        acc_width = n_work + 1
+        acc_qubits = list(range(n_counting + n_work, n_counting + n_work + acc_width))
+        ancilla = n_counting + n_work + acc_width
+        and_ancilla = ancilla + 1
+        extra_qubits = acc_width + 2  # acc_qubits + ancilla + and_ancilla
+
     a = args.a if args.a is not None else pick_base(args.N, rng)
     print(f"Factoring N = {args.N} with base a = {a}")
 
@@ -282,11 +341,22 @@ def main() -> None:
         return
 
     device = get_device(args.device, args.qpu_arn)
-    circuit = build_shor_circuit(a, args.N, counting_qubits, work_qubits)
-    total_qubits = n_counting + n_work
+    circuit = build_shor_circuit(
+        a,
+        args.N,
+        counting_qubits,
+        work_qubits,
+        backend=args.backend,
+        acc_qubits=acc_qubits,
+        ancilla=ancilla,
+        and_ancilla=and_ancilla,
+    )
+    total_qubits = n_counting + n_work + extra_qubits
     print(
         f"\nQuantum phase estimation circuit ({n_counting} counting qubits + "
-        f"{n_work} work qubits = {total_qubits} total):"
+        f"{n_work} work qubits"
+        + (f" + {extra_qubits} ancilla ({args.backend} backend)" if extra_qubits else "")
+        + f" = {total_qubits} total):"
     )
     if total_qubits <= 6:
         print(circuit)

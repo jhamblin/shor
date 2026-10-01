@@ -201,6 +201,49 @@ def test_end_to_end_factors_15():
     assert found_factors
 
 
+def test_end_to_end_factors_15_with_gates_backend():
+    """Same as test_end_to_end_factors_15 but via --backend gates (the
+    quantum-arithmetic sibling repo's elementary-gate modexp_ladder,
+    instead of Circuit.unitary()) -- skipped if that sibling repo isn't
+    cloned alongside this one, since it's not a pip dependency (see
+    README section 9.2)."""
+    try:
+        shor._load_quantum_arithmetic()
+    except SystemExit:
+        pytest.skip("quantum-arithmetic sibling repo not found; see README section 9.2")
+    N, a = 15, 7
+    n_work = shor.n_bits_for(N)
+    t = 2 * n_work
+    counting = list(range(t))
+    work = list(range(t, t + n_work))
+    acc_width = n_work + 1
+    acc = list(range(t + n_work, t + n_work + acc_width))
+    ancilla = t + n_work + acc_width
+    and_ancilla = ancilla + 1
+
+    circuit = shor.build_shor_circuit(
+        a, N, counting, work, backend="gates", acc_qubits=acc, ancilla=ancilla, and_ancilla=and_ancilla
+    )
+    result = LocalSimulator().run(circuit, shots=200).result()
+    counts = result.measurement_counts
+
+    found_factors = False
+    for bitstring, _count in counts.items():
+        y = int(bitstring[:t], 2)
+        from fractions import Fraction
+
+        r = Fraction(y, 2**t).limit_denominator(N).denominator
+        if shor.try_factor(a, r, N):
+            found_factors = True
+            break
+    assert found_factors
+
+
+def test_build_shor_circuit_rejects_unknown_backend():
+    with pytest.raises(ValueError):
+        shor.build_shor_circuit(7, 15, [0, 1], [2, 3], backend="nonsense")
+
+
 def test_get_device_local_needs_no_aws_credentials():
     device = shor.get_device("local", None)
     assert isinstance(device, LocalSimulator)

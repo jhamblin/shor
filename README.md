@@ -2,9 +2,11 @@
 
 Factor an odd composite number using Shor's algorithm on Amazon Braket —
 the algorithm that, if run at scale on a large enough quantum computer,
-would break RSA encryption. Runs against Braket's free local simulator
-or a managed AWS simulator — see §7 for why real QPU hardware is a
-harder story for this particular project than its two companions.
+would break RSA encryption. Runs against Braket's free local simulator,
+a managed AWS simulator, or — via `--backend gates` and the
+[`quantum-arithmetic`](../quantum-arithmetic) sibling repo — real
+Rigetti/IQM hardware (not IonQ; see §9.2 for why that's a confirmed
+hard limit, not a missing flag).
 
 This is the third in a series of Braket "hello world" demos — after a
 [Bell state](../bell) (qubits, kets, gates) and a [Grover's-algorithm
@@ -323,24 +325,33 @@ convenience.)
   computation — a nice parallel to the quantum circuit's own
   repeated-squaring structure) and turning that single multiplier into
   one exact matrix via `modmul_unitary` + `controlled_unitary_matrix`.
-- `build_shor_circuit(...)` — assembles the full circuit: `H` on the
-  counting register, `X` to prepare `|1⟩`, the modular-exponentiation
-  ladder, inverse QFT.
+- `_load_quantum_arithmetic()` — finds and imports the
+  [`quantum-arithmetic`](../quantum-arithmetic) sibling repo (via
+  `sys.path`, not a pip install — see §9.2), used only by `--backend gates`.
+- `build_shor_circuit(..., backend, acc_qubits, ancilla, and_ancilla)` —
+  assembles the full circuit: `H` on the counting register, `X` to
+  prepare `|1⟩`, the modular-exponentiation ladder (dispatched to
+  `build_modexp_circuit` or `quantum_arithmetic.modexp_ladder` depending
+  on `backend`), inverse QFT. Only `--backend gates` needs the three
+  extra ancilla arguments.
 - `wait_for_result(task)` — same AWS task-ID/cancel-on-interrupt
   helper as the sibling projects.
-- `main()` — CLI: pick/validate `a`, try the classical shortcut, build
-  and run the circuit, walk every distinct measured outcome through
+- `main()` — CLI: pick/validate `a`, try the classical shortcut, work
+  out the qubit layout for whichever `--backend` was chosen, build and
+  run the circuit, walk every distinct measured outcome through
   continued fractions and `try_factor`, report the first success.
 
-**On `Circuit.unitary()`.** Rather than hand-building a dedicated
-arithmetic circuit (adders, controlled multipliers, out of elementary
-gates) for *every* `(N, a)` pair — a substantial undertaking in its
-own right, and the subject of real published papers — each
-controlled-`U^(2^k)` is applied as one exact matrix via Braket's
-generic `Circuit.unitary(matrix=..., targets=...)` gate. This keeps
-the implementation's complexity independent of `N` and `a` entirely,
-at a real cost: it only runs on simulators. See §8 for exactly why,
-and what a QPU-compatible version would need instead.
+**On `Circuit.unitary()`** (the default `--backend unitary`). Rather
+than hand-building a dedicated arithmetic circuit (adders, controlled
+multipliers, out of elementary gates) for *every* `(N, a)` pair — a
+substantial undertaking in its own right, and the subject of real
+published papers — each controlled-`U^(2^k)` is applied as one exact
+matrix via Braket's generic `Circuit.unitary(matrix=..., targets=...)`
+gate. This keeps the implementation's complexity independent of `N`
+and `a` entirely, at a real cost: it only runs on simulators.
+`--backend gates` (§9.2) is that dedicated arithmetic circuit, built in
+the `quantum-arithmetic` sibling repo instead of here, since it isn't
+Shor-specific.
 
 ## 8. Setup
 
@@ -381,28 +392,61 @@ projects, same one-time AWS setup (credentials, S3 bucket — see the
 full steps). SV1's qubit limit (34) comfortably covers `N` well beyond
 what's practical to interpret by hand.
 
-### 9.2 Real quantum hardware (QPU) — doesn't work here, and why
+### 9.2 Real quantum hardware (QPU) — `--backend unitary` doesn't work, `--backend gates` does (on Rigetti/IQM)
 
-Unlike its sibling projects, **this one cannot run on a real QPU as
-written.** Braket's generic `Circuit.unitary()` gate — what
-`build_modexp_circuit()` uses for every controlled-`U^(2^k)` — is a
-simulator-only operation. Checked directly against a real device's
-published capabilities (IonQ Forte-1's supported-operations list has
-no `unitary` entry at all, only elementary gates like `x`, `y`, `z`,
-`h`, native rotations, etc.), so `--device qpu` will fail outright
-here, not just run noisily like the Grover project's larger `--qubits`
-values do.
+**`--backend unitary` (the default) cannot run on any real QPU.**
+Braket's generic `Circuit.unitary()` gate — what `build_modexp_circuit()`
+uses for every controlled-`U^(2^k)` — is a simulator-only operation.
+Checked directly against real devices' published capabilities, no
+gate-based QPU on Braket accepts it, so `--device qpu` fails outright
+with this backend, not just noisily like the Grover project's larger
+`--qubits` values do.
 
-Building a real QPU-compatible version would mean replacing
-`build_modexp_circuit()` with an actual **arithmetic circuit** —
-quantum adders and controlled modular multipliers built from `CNOT`,
-Toffoli, and QFT-based addition (e.g. the Draper adder), the subject
-of real published circuit constructions for modular exponentiation.
-That's a substantial project in its own right, well beyond converting
-a flag — real demonstrations of Shor's algorithm on actual quantum
-hardware (factoring 15, famously) have historically needed exactly
-this kind of custom, N-specific circuit optimization, and even then
-only work on today's hardware for the smallest textbook cases.
+**`--backend gates` replaces that with real arithmetic circuits** — a
+Quantum Fourier Transform-based adder, a modular adder, and a controlled
+modular multiplier, built entirely from elementary gates. That
+construction lives in a separate sibling repo,
+[`quantum-arithmetic`](../quantum-arithmetic), because those circuits
+aren't Shor-specific — they're general-purpose building blocks, not
+something that belongs inside this demo. See its README for the full
+derivation.
+
+```bash
+python shor.py --N 15 --a 7 --backend gates --device sv1 --shots 1000
+```
+
+**This works on Rigetti and IQM, but not IonQ — confirmed, not just
+untested.** IonQ's accepted gate set has no `cphaseshift` and no `ccnot`
+at all, and more fundamentally, no combination of IonQ's actual gates
+can reach `cphaseshift`'s behavior (every gate it accepts has either
+determinant exactly `1` for every angle, or a fixed discrete phase;
+`cphaseshift(θ)` needs determinant `e^{iθ}`, which is neither) — a
+mathematical limit confirmed independently by AWS's own official Shor's
+algorithm example, which uses `cphaseshift` for the same reason and
+only ever demonstrates running on simulators. See
+`quantum-arithmetic`'s README §8 for the full account, including why
+the usual semiclassical/iterative alternative doesn't rescue IonQ
+either (it needs mid-circuit measurement with classical feedback, which
+IonQ's Braket-exposed capabilities show no evidence of supporting).
+
+**The qubit cost is real.** `--backend gates` needs `len(work_qubits)+3`
+extra ancilla qubits beyond `--backend unitary` (an `n+1`-wide
+accumulator register, plus 2 single ancillas) — for `N=15`'s default
+8 counting + 4 work qubits, that's 19 total instead of 12. Gate count
+grows substantially too, since every controlled modular addition now
+decomposes into dozens of elementary gates instead of one `unitary()`
+call. An *accepted* circuit still isn't the same thing as one that
+reliably factors `N` on today's noisy hardware — expect real Rigetti/IQM
+runs to need meaningfully more shots, and to see the hidden-period
+signal degrade faster than the Grover project's circuits do as `N`
+grows, simply because this circuit is much deeper.
+
+**Setup**: `quantum-arithmetic` must be cloned as a sibling directory
+(`../quantum-arithmetic` relative to this repo — there's no
+pip-installable packaging here, just a `sys.path` insertion at import
+time, consistent with this whole project family's flat-file style).
+`--backend gates` without it fails with a clear message naming the
+expected path, rather than a bare `ImportError`.
 
 ## 10. Extending this
 
