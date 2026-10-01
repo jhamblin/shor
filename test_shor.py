@@ -252,3 +252,53 @@ def test_get_device_local_needs_no_aws_credentials():
 def test_get_device_qpu_requires_an_arn():
     with pytest.raises(SystemExit):
         shor.get_device("qpu", None)
+
+
+# --- wait_for_result ---------------------------------------------------
+
+
+def test_wait_for_result_returns_normally_without_interrupt():
+    class FakeTask:
+        id = "fake-id"
+
+        def result(self):
+            return "the result"
+
+    assert shor.wait_for_result(FakeTask()) == "the result"
+
+
+def test_wait_for_result_cancels_task_on_keyboard_interrupt():
+    class FakeTask:
+        id = "arn:aws:braket:us-west-2:123:quantum-task/fake"
+        cancel_called = False
+
+        def result(self):
+            raise KeyboardInterrupt
+
+        def cancel(self):
+            self.cancel_called = True
+
+    task = FakeTask()
+    with pytest.raises(SystemExit):
+        shor.wait_for_result(task)
+    assert task.cancel_called
+
+
+def test_wait_for_result_raises_clearly_on_failed_task():
+    """Regression test: task.result() returns None (not an exception) when
+    a task fails -- the circumstance that actually caused this script to
+    crash with a confusing AttributeError on a real Rigetti Cepheus-1-108Q
+    run, when --backend gates's circuit exceeded the device compiler's
+    gate-count limit (see README section 9.2) -- instead of a clear message."""
+
+    class FakeTask:
+        id = "fake-id"
+
+        def result(self):
+            return None
+
+        def state(self):
+            return "FAILED"
+
+    with pytest.raises(SystemExit, match="FAILED"):
+        shor.wait_for_result(FakeTask())

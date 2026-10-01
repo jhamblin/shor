@@ -2,11 +2,14 @@
 
 Factor an odd composite number using Shor's algorithm on Amazon Braket —
 the algorithm that, if run at scale on a large enough quantum computer,
-would break RSA encryption. Runs against Braket's free local simulator,
-a managed AWS simulator, or — via `--backend gates` and the
-[`quantum-arithmetic`](../quantum-arithmetic) sibling repo — real
-Rigetti/IQM hardware (not IonQ; see §9.2 for why that's a confirmed
-hard limit, not a missing flag).
+would break RSA encryption. Runs against Braket's free local simulator
+or a managed AWS simulator. A `--backend gates` option, built on the
+[`quantum-arithmetic`](../quantum-arithmetic) sibling repo, uses only
+gates Rigetti and IQM accept (not IonQ — see §9.2 for why that's a
+confirmed hard limit); a real submission to Rigetti confirmed the
+gate-set choice is right but also surfaced a second, independent limit
+— a real-hardware compiler gate-count cap this circuit exceeds at any
+`N` worth factoring. See §9.2 for the full, concrete account.
 
 This is the third in a series of Braket "hello world" demos — after a
 [Bell state](../bell) (qubits, kets, gates) and a [Grover's-algorithm
@@ -432,14 +435,45 @@ IonQ's Braket-exposed capabilities show no evidence of supporting).
 **The qubit cost is real.** `--backend gates` needs `len(work_qubits)+3`
 extra ancilla qubits beyond `--backend unitary` (an `n+1`-wide
 accumulator register, plus 2 single ancillas) — for `N=15`'s default
-8 counting + 4 work qubits, that's 19 total instead of 12. Gate count
-grows substantially too, since every controlled modular addition now
-decomposes into dozens of elementary gates instead of one `unitary()`
-call. An *accepted* circuit still isn't the same thing as one that
-reliably factors `N` on today's noisy hardware — expect real Rigetti/IQM
-runs to need meaningfully more shots, and to see the hidden-period
-signal degrade faster than the Grover project's circuits do as `N`
-grows, simply because this circuit is much deeper.
+8 counting + 4 work qubits, that's 19 total instead of 12.
+
+**Confirmed on real hardware: accepted gate-set is not the whole
+story.** A real submission to Rigetti Cepheus-1-108Q with `--N 15 --a 7
+--backend gates --shots 200` was accepted at the gate-set level
+(exactly as expected — every gate used is one Rigetti natively
+supports) but then **failed compilation** with:
+
+```
+Compiled circuit produced a gate count limit validation error during
+translation: The total number of gates in the circuit is higher than
+20,000. It is currently 273,727.
+```
+
+This is a *different* limit than the gate-set question §9.2 opens
+with — Rigetti's compiler caps the total gate count *after* it expands
+our `cphaseshift`/`ccnot`/`cswap` calls into its own native gates
+(`rx`, `rz`, `iswap`), and that expansion factor turned out to be
+roughly 20×. Checked locally (no further cost): even the most minimal,
+precision-destroying configuration — `--counting-qubits 1` on the
+smallest meaningful `N` (`9` and `15` both need the same 4-bit work
+register; there's no smaller odd composite) — still builds roughly
+1,700 of our own gates, which extrapolates to ~34,000 compiled gates:
+**still over the limit, even in the degenerate case that would be too
+imprecise to actually estimate a phase.** No device-exposed field
+declares this limit in advance (checked `device.properties` directly —
+nothing named for gate count, gate limit, or max depth), so it's only
+discoverable by an actual submission, which is how this project found
+it. IQM's compiler may have a different limit; untested, since probing
+it costs a real task fee with an uncertain outcome each time.
+
+**Net effect**: this general-purpose construction is gate-set-valid on
+Rigetti but not practically submittable there for any `N` worth
+factoring. A circuit that actually fits would need either a much
+smaller gate-count budget per modular addition (this implementation
+prioritized correctness and generality over gate efficiency — see
+`quantum-arithmetic`'s README for the construction) or the kind of
+hand-optimized, `N`-specific circuit AWS's own official example uses
+for its hardcoded `N=15` case.
 
 **Setup**: `quantum-arithmetic` must be cloned as a sibling directory
 (`../quantum-arithmetic` relative to this repo — there's no
